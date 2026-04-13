@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: gacha-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: gachadb
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - gacha-network
+
+  # Redis for Concurrency Control
+  redis:
+    image: redis:latest
+    container_name: gacha-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - gacha-network
+
+volumes:
+  mysql_data:
+
+networks:
+  gacha-network:
+    driver: bridge
