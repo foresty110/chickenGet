@@ -9,7 +9,7 @@ import java.time.LocalDateTime;
 @Getter
 @NoArgsConstructor
 @Table(uniqueConstraints = {
-    @UniqueConstraint(name = "uk_coupon_user", columnNames = {"couponId", "userId"})
+    @UniqueConstraint(name = "uk_coupon_policy_user", columnNames = {"couponPolicyId", "userId"})
 })
 public class CouponHistory {
 
@@ -18,7 +18,7 @@ public class CouponHistory {
     private Long id;
 
     @Column(nullable = false)
-    private Long couponId;
+    private Long couponPolicyId;
 
     @Column(nullable = false)
     private Long userId;
@@ -26,9 +26,14 @@ public class CouponHistory {
     @Column(nullable = false)
     private LocalDateTime issuedAt;
 
-    public CouponHistory(Long couponId, Long userId) {
-        this.couponId = couponId;
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private CouponStatus status;
+
+    public CouponHistory(Long couponPolicyId, Long userId) {
+        this.couponPolicyId = couponPolicyId;
         this.userId = userId;
         this.issuedAt = LocalDateTime.now();
+        this.status = CouponStatus.ISSUED;
     }
 }
