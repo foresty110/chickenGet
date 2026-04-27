@@ -1,5 +1,38 @@
-.gradle/
+# --- Java / Gradle ---
+.gradle
 build/
-node_modules/
-.next/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/resources/archetype-resources/google-services.json
+out/
+bin/
+
+# --- Node / Frontend ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env*
+frontend/.vercel
+
+# --- IDEs / Tools ---
+.idea/
+*.iml
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+*.sublime-project
+*.sublime-workspace
+
+# --- OS / System ---
 .DS_Store
+Thumbs.db
+*.swp
+*.log
+.gemini/
+
+# --- Project Specific ---
+.env
+docker/db/data/

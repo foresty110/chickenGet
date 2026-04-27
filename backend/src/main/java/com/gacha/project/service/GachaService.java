@@ -1,10 +1,18 @@
 package com.gacha.project.service;
 
+import com.gacha.project.entity.CouponPolicy;
+import com.gacha.project.entity.CouponStock;
+import com.gacha.project.entity.CouponHistory;
+import com.gacha.project.repository.CouponPolicyRepository;
+import com.gacha.project.repository.CouponStockRepository;
+import com.gacha.project.repository.CouponHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -13,40 +21,121 @@ import java.util.concurrent.TimeUnit;
 public class GachaService {
 
     private final RedissonClient redissonClient;
-    // 테스트용 메모리 재고 (실제 운영 시에는 DB 연동 필수)
-    private int couponStock = 10; 
+    private final CouponPolicyRepository couponPolicyRepository;
+    private final CouponStockRepository couponStockRepository;
+    private final CouponHistoryRepository couponHistoryRepository;
+    private final TransactionTemplate transactionTemplate;
 
     public String tryDrawGacha(Long userId) {
-        String lockKey = "lock:gacha:coupon";
+        Long policyId = 1L; 
+        String lockKey = "lock:gacha:policy:" + policyId;
         RLock lock = redissonClient.getLock(lockKey);
 
         try {
-            // 락 획득 시도 (최대 10초 대기, 획득 후 2초 유지)
-            boolean isLocked = lock.tryLock(10, 2, TimeUnit.SECONDS);
-
+            boolean isLocked = lock.tryLock(100, 3, TimeUnit.SECONDS);
             if (!isLocked) {
-                log.info("유저 {} - 락 획득 실패 (대기 시간 초과)", userId);
                 throw new RuntimeException("현재 참여자가 많아 잠시 후 다시 시도해주세요.");
             }
 
-            // --- 비즈니스 로직 (재고 체크 및 차감) ---
-            log.info("유저 {} 가챠 로직 진입. 현재 재고: {}", userId, couponStock);
+            return transactionTemplate.execute(status -> processCouponIssuance(policyId, userId));
             
-            if (couponStock <= 0) {
-                throw new IllegalStateException("준비된 쿠폰이 모두 소진되었습니다.");
-            }
-
-            couponStock--;
-            return "치킨 1마리 당첨! (남은 재고: " + couponStock + ")";
-
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("시스템 오류가 발생했습니다.");
         } finally {
-            // 락 해제 (현재 스레드가 락을 가지고 있는 경우에만)
             if (lock.isLocked() && lock.isHeldByCurrentThread()) {
                 lock.unlock();
             }
         }
+    }
+
+    public String tryDrawGachaWithDbLock(Long userId) {
+        Long policyId = 1L;
+        return transactionTemplate.execute(status -> {
+            CouponPolicy policy = couponPolicyRepository.findById(policyId)
+                    .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 쿠폰 정책입니다."));
+
+            if (!policy.isAvailable()) {
+                throw new IllegalStateException("현재는 쿠폰 발급 기간이 아닙니다.");
+            }
+
+            if (couponHistoryRepository.existsByCouponPolicyIdAndUserId(policyId, userId)) {
+                throw new IllegalStateException("이미 당첨된 이력이 있습니다.");
+            }
+
+            CouponStock stock = couponStockRepository.findByCouponPolicyIdWithLock(policyId)
+                    .orElseThrow(() -> new IllegalStateException("해당 쿠폰의 재고 정보가 없습니다."));
+            
+            stock.decrease();
+            
+            CouponHistory history = new CouponHistory(policyId, userId);
+            couponHistoryRepository.save(history);
+
+            log.info("[DB Lock] 쿠폰 발급 성공 - userId: {}, 남은 재고: {}", userId, stock.getRemainingQuantity());
+            
+            return policy.getName() + " 당첨! (남은 재고: " + stock.getRemainingQuantity() + ")";
+        });
+    }
+
+    public String tryDrawGachaWithLua(Long userId) {
+        Long policyId = 1L;
+        String stockKey = "gacha:stock:" + policyId;
+        String userKey = "gacha:winners:" + policyId;
+// Lua Script 수정: -1(중복), -2(품절), 그 외(남은 재고)
+String luaScript = 
+    "if redis.call('sismember', KEYS[2], ARGV[1]) == 1 then return -1 end " +
+    "local stock = tonumber(redis.call('get', KEYS[1]) or 0) " +
+    "if stock <= 0 then return -2 end " +
+    "local remaining = redis.call('decr', KEYS[1]) " +
+    "redis.call('sadd', KEYS[2], ARGV[1]) " +
+    "return remaining";
+
+try {
+    // ReturnType을 VALUE로 받아 유연하게 처리
+    Object result = redissonClient.getScript().eval(
+        org.redisson.api.RScript.Mode.READ_WRITE,
+        luaScript,
+        org.redisson.api.RScript.ReturnType.VALUE,
+        java.util.Arrays.asList(stockKey, userKey),
+        userId.toString()
+    );
+
+    long res = Long.parseLong(result.toString());
+
+    if (res == -1) throw new IllegalStateException("이미 당첨된 이력이 있습니다.");
+    if (res == -2) throw new IllegalStateException("준비된 쿠폰 재고가 모두 소진되었습니다.");
+
+
+            log.info("[Lua] 쿠폰 발급 성공 - userId: {}, 남은 재고: {}", userId, res);
+            return "당첨! (남은 재고: " + res + ")";
+            
+        } catch (Exception e) {
+            throw new RuntimeException(e.getMessage());
+        }
+    }
+
+    private String processCouponIssuance(Long policyId, Long userId) {
+        CouponPolicy policy = couponPolicyRepository.findById(policyId)
+                .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 쿠폰 정책입니다."));
+
+        if (!policy.isAvailable()) {
+            throw new IllegalStateException("현재는 쿠폰 발급 기간이 아닙니다.");
+        }
+
+        if (couponHistoryRepository.existsByCouponPolicyIdAndUserId(policyId, userId)) {
+            throw new IllegalStateException("이미 당첨된 이력이 있습니다.");
+        }
+
+        CouponStock stock = couponStockRepository.findByCouponPolicyId(policyId)
+                .orElseThrow(() -> new IllegalStateException("해당 쿠폰의 재고 정보가 없습니다."));
+        
+        stock.decrease();
+        
+        CouponHistory history = new CouponHistory(policyId, userId);
+        couponHistoryRepository.save(history);
+
+        log.info("쿠폰 발급 성공 - userId: {}, 남은 재고: {}", userId, stock.getRemainingQuantity());
+        
+        return policy.getName() + " 당첨! (남은 재고: " + stock.getRemainingQuantity() + ")";
     }
 }
