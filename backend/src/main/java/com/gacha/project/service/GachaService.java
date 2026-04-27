@@ -81,30 +81,33 @@ public class GachaService {
         Long policyId = 1L;
         String stockKey = "gacha:stock:" + policyId;
         String userKey = "gacha:winners:" + policyId;
+// Lua Script 수정: -1(중복), -2(품절), 그 외(남은 재고)
+String luaScript = 
+    "if redis.call('sismember', KEYS[2], ARGV[1]) == 1 then return -1 end " +
+    "local stock = tonumber(redis.call('get', KEYS[1]) or 0) " +
+    "if stock <= 0 then return -2 end " +
+    "local remaining = redis.call('decr', KEYS[1]) " +
+    "redis.call('sadd', KEYS[2], ARGV[1]) " +
+    "return remaining";
 
-        String luaScript = 
-            "if redis.call('sismember', KEYS[2], ARGV[1]) == 1 then return -1 end " +
-            "if tonumber(redis.call('get', KEYS[1]) or 0) <= 0 then return -2 end " +
-            "redis.call('decr', KEYS[1]) " +
-            "redis.call('sadd', KEYS[2], ARGV[1]) " +
-            "return redis.call('get', KEYS[1])";
+try {
+    // ReturnType을 VALUE로 받아 유연하게 처리
+    Object result = redissonClient.getScript().eval(
+        org.redisson.api.RScript.Mode.READ_WRITE,
+        luaScript,
+        org.redisson.api.RScript.ReturnType.VALUE,
+        java.util.Arrays.asList(stockKey, userKey),
+        userId.toString()
+    );
 
-        try {
-            Object resultObj = redissonClient.getScript().eval(
-                org.redisson.api.RScript.Mode.READ_WRITE,
-                luaScript,
-                org.redisson.api.RScript.ReturnType.INTEGER,
-                java.util.Arrays.asList(stockKey, userKey),
-                userId.toString()
-            );
+    long res = Long.parseLong(result.toString());
 
-            Long result = Long.valueOf(resultObj.toString());
+    if (res == -1) throw new IllegalStateException("이미 당첨된 이력이 있습니다.");
+    if (res == -2) throw new IllegalStateException("준비된 쿠폰 재고가 모두 소진되었습니다.");
 
-            if (result == -1) throw new IllegalStateException("이미 당첨된 이력이 있습니다.");
-            if (result == -2) throw new IllegalStateException("준비된 쿠폰 재고가 모두 소진되었습니다.");
 
-            log.info("[Lua] 쿠폰 발급 성공 - userId: {}, 남은 재고: {}", userId, result);
-            return "당첨! (남은 재고: " + result + ")";
+            log.info("[Lua] 쿠폰 발급 성공 - userId: {}, 남은 재고: {}", userId, res);
+            return "당첨! (남은 재고: " + res + ")";
             
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage());
